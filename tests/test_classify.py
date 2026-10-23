@@ -30,7 +30,7 @@ class Classification(unittest.TestCase):
         self.assertEqual(result["evidence"][0]["line"], 2)
 
     def test_real_script_watchdog_checkpoint_cancelled(self):
-        result = self.analyze("Writing checkpoint chk042\n"
+        result = self.analyze("Writing checkpoint chk0000042\n"
             "WATCHDOG: No log writes for 900s. Collecting backtraces.\n"
             "WATCHDOG: Collecting backtraces into logs/watchdog_backtraces_42_20000101\n"
             "srun: Job step aborted: Waiting up to 32 seconds for job step to finish.\n", "CANCELLED")

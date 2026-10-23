@@ -6,3 +6,10 @@ dist/
 webhook
 config.json
 !examples/config.json
+.slurm-failures/
+state.sqlite3
+state.sqlite3-*
+watcher.lock
+reports/
+slurm-*.out
+slurm-*.err

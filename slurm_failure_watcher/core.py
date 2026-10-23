@@ -398,7 +398,7 @@ def ensure_gist(config: dict, root: Path, key: str) -> str:
 
 DEFAULTS = {"state_dir": "~/.slurm-failures", "webhook_file": "~/.config/slurm-failure-watcher/webhook",
             "sacct": "sacct", "sacct_timeout": 120, "slack_timeout": 20,
-            "gh": "gh", "gist_timeout": 120,
+            "upload_gist": False, "gh": "gh", "gist_timeout": 120,
             "squeue": "squeue", "scancel": "scancel", "slurm_command_timeout": 120,
             "chain_scan_seconds": 60, "chain_watch_seconds": 86400,
             "overlap_seconds": 86400, "deep_scan_seconds": 86400, "settle_seconds": 60,
@@ -414,7 +414,9 @@ class Watcher:
         self.config = DEFAULTS | config
         for key, default in DEFAULTS.items():
             value = self.config[key]
-            if isinstance(default, int) and (type(value) is not int or value <= 0):
+            if type(default) is bool and type(value) is not bool:
+                raise ValueError(f"{key} must be a boolean")
+            if type(default) is int and (type(value) is not int or value <= 0):
                 raise ValueError(f"{key} must be a positive integer")
             if isinstance(default, str) and (not isinstance(value, str) or not value):
                 raise ValueError(f"{key} must be a nonempty string")
@@ -570,22 +572,24 @@ class Watcher:
                             db.execute("UPDATE jobs SET slack_next=? WHERE id=?", (now + config["retry_max_seconds"], key))
                         healthy = False
                         continue
-                    gist_url = row["gist_url"]
-                    if not gist_url:
-                        try:
-                            gist_url = ensure_gist(config, self.root, key)
-                        except RuntimeError as error:
-                            attempts = row["gist_attempts"] + 1
+                    gist_url = None
+                    if config["upload_gist"]:
+                        gist_url = row["gist_url"]
+                        if not gist_url:
+                            try:
+                                gist_url = ensure_gist(config, self.root, key)
+                            except RuntimeError as error:
+                                attempts = row["gist_attempts"] + 1
+                                with db:
+                                    db.execute("""UPDATE jobs SET gist_attempts=?,gist_error=?,slack_next=?
+                                        WHERE id=?""", (attempts, type(error).__name__,
+                                        now + self.backoff(attempts - 1), key))
+                                LOG.error("secret gist creation failed; Slack delivery remains pending")
+                                healthy = False
+                                continue
                             with db:
-                                db.execute("""UPDATE jobs SET gist_attempts=?,gist_error=?,slack_next=?
-                                    WHERE id=?""", (attempts, type(error).__name__,
-                                    now + self.backoff(attempts - 1), key))
-                            LOG.error("secret gist creation failed; Slack delivery remains pending")
-                            healthy = False
-                            continue
-                        with db:
-                            db.execute("""UPDATE jobs SET gist_url=?,gist_attempts=gist_attempts+1,
-                                gist_error=NULL WHERE id=?""", (gist_url, key))
+                                db.execute("""UPDATE jobs SET gist_url=?,gist_attempts=gist_attempts+1,
+                                    gist_error=NULL WHERE id=?""", (gist_url, key))
                     text = slack_text(job, classification, cancellation, gist_url)
                     with db:
                         db.execute("UPDATE jobs SET slack_status='sending',slack_attempts=slack_attempts+1 WHERE id=?", (key,))

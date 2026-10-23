@@ -75,6 +75,15 @@ class Fixture(unittest.TestCase):
         self.assertEqual(Path(manifest["logs"][0]["copy"]).suffix, ".txt")
         self.assertEqual((directory / manifest["logs"][0]["copy"]).read_bytes(), content)
         self.assertLessEqual(len(self.post.call_args.args[1]), 2900)
+        self.assertNotIn("Report and logs", self.post.call_args.args[1])
+        self.gist.assert_not_called()
+
+    def test_gist_upload_requires_explicit_opt_in(self):
+        self.discover()
+        self.w.config["upload_gist"] = True
+        self.w.run(now=1103)
+        self.gist.assert_called_once()
+        self.assertIn("https://gist.github.com/test/abc123", self.post.call_args.args[1])
 
     def test_log_delay_and_late_accounting_metadata(self):
         log = self.root / "late"
@@ -464,7 +473,8 @@ class HttpAndSecurity(unittest.TestCase):
                 c.read_secret(path)
 
     def test_configuration_validation(self):
-        for config in ({"sacct_timeout": 0}, {"typo": 1}, {"settle_seconds": True}):
+        for config in ({"sacct_timeout": 0}, {"typo": 1}, {"settle_seconds": True},
+                       {"upload_gist": 1}):
             with self.assertRaises(ValueError):
                 c.Watcher(config)
 

@@ -4,6 +4,7 @@
   "sacct": "/usr/bin/sacct",
   "squeue": "/usr/bin/squeue",
   "scancel": "/usr/bin/scancel",
+  "upload_gist": false,
   "gh": "/home/USER/.local/bin/gh",
   "slurm_command_timeout": 120,
   "chain_scan_seconds": 60,

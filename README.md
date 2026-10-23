@@ -24,7 +24,6 @@ install -m 600 examples/config.json ~/.config/slurm-failure-watcher/config.json
 command -v sacct
 command -v squeue
 command -v scancel
-command -v gh
 ```
 
 Edit the installed configuration's `sacct`, `squeue`, and `scancel` values to the
@@ -32,12 +31,14 @@ absolute executable paths on your site. If Slurm requires modules or special env
 those in a private wrapper script and point the scheduler at that wrapper. Use an
 explicit Python path; cron and systemd do not load your interactive shell setup.
 
-Authenticate GitHub CLI as the watcher user and grant its token the `gist` scope.
-Set `gh` in the configuration to the absolute executable path. Before each Slack
-delivery, the watcher creates one secret gist containing `report.json` and its
-referenced log snapshots, then includes the gist URL in Slack. GitHub secret gists
-are unlisted, not access-controlled: anyone with the URL can read them. Use this
-only when uploading the report and logs complies with site and data policy.
+By default, reports and logs remain in the private local state directory and Slack
+receives only a concise failure summary. To opt in to uploading the full report
+and copied logs, set `upload_gist` to `true`, authenticate GitHub CLI as the watcher
+user with the `gist` scope, and set `gh` to its absolute executable path. The
+watcher then creates an unlisted gist before Slack delivery and includes its URL.
+GitHub secret gists are not access-controlled: anyone with the URL can read them.
+Enable this only when uploading the report and logs complies with site and data
+policy.
 
 Create a Slack app with an incoming webhook for the intended channel using
 [Slack's incoming webhook instructions](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/).
@@ -158,9 +159,8 @@ do not produce Slack failure alerts. Historical jobs excluded by initialization
 do not become cancellation roots. Upgrading an existing state database enables
 the policy for failures already recorded by that installation too.
 
-The implementation follows the snapshot and breadth-first traversal approach in
-`~/example-workflows/inputs/scripts/cancel-slurm-chain.sh`, with durable plans
-and revalidation. Unlike that interactive utility, this watcher automatically
+The implementation uses a snapshot and breadth-first traversal approach with
+durable plans and revalidation. It automatically
 follows **only `afterok` edges**, preserving jobs attached solely through
 `afterany`, `afternotok`, `aftercorr`, or other dependency types. For example:
 
@@ -255,11 +255,9 @@ Incomplete/unsettled log discovery marks the classification `provisional`.
 Delayed reports are reclassified as logs become available; an already-sent Slack
 post is not sent again when the diagnosis changes.
 
-The built-in `quokka-v1` rules were checked against the local Quokka source
-(`src/simulation.hpp`, `src/io/DiagPlotfile.H`) and the job scripts in
-`~/example-workflows/inputs`, including
-`example/run-a.submit` and `example/run-b.submit`.
-These source repositories are **not runtime dependencies**. In those scripts,
+The built-in `quokka-v1` rules were checked against Quokka source behavior
+(`src/simulation.hpp`, `src/io/DiagPlotfile.H`) and representative job scripts.
+These sources are **not runtime dependencies**. In the checked scripts,
 `WATCHDOG: No log writes for 900s. Collecting backtraces.` precedes backtrace
 collection and `scancel`. Both stdout and stderr use `logs/%x_%j.out`. Quokka
 prints `Writing plotfile <path>` and `Writing checkpoint <path>` without a general
@@ -293,8 +291,8 @@ For example:
 
 ```text
 Coarse STEP 42 at t = ... starts ...
-Writing plotfile plt042
-Writing checkpoint chk042
+Writing plotfile plt0000042
+Writing checkpoint chk0000042
 WATCHDOG: No log writes for 900s. Collecting backtraces.
 WATCHDOG: Collecting backtraces into logs/watchdog_backtraces_12345_20000101_120000
 ```
@@ -378,14 +376,16 @@ capped exponential backoff. Slack waits up to `log_wait_seconds` after discovery
 (default 15 minutes), then sends available excerpts with an explicit partial
 warning. Report attempts continue independently. Slack messages contain the job
 identity, partition, Slurm start/end/elapsed timestamps, failure category and
-explanation, exit code, and secret gist link. They omit local report paths and
-inline log excerpts; the gist contains the full report and copied logs. Slack
-mention/link control syntax is escaped before delivery.
-Reports retain original bytes.
-The full report and copied logs are also uploaded to an unlisted GitHub secret
-gist. A deterministic event description is checked before creation, allowing a
-retry to recover a gist created just before a timeout or process interruption.
-The persisted gist URL prevents later Slack retries from creating duplicates.
+explanation, and exit code. They omit local report paths and inline log excerpts.
+Slack mention/link control syntax is escaped before delivery. Reports retain
+original bytes.
+
+When `upload_gist` is `true`, the full report and copied logs are uploaded to an
+unlisted GitHub secret gist and its URL is added to Slack. A deterministic event
+description is checked before creation, allowing a retry to recover a gist created
+just before a timeout or process interruption. The persisted gist URL prevents
+later Slack retries from creating duplicates. Gist creation failure holds Slack
+delivery for retry; with the default `false` setting, GitHub is never invoked.
 
 ## Delivery durability and operational checks
 
