@@ -109,7 +109,9 @@ class DurableCancellation(unittest.TestCase):
         self.accounting = patch.object(c, "query", return_value=[]).start()
         self.queue = patch.object(ch, "snapshot", return_value={}).start()
         self.command = patch.object(ch, "run_command").start()
-        self.post = patch.object(c, "post").start()
+        self.post = patch.object(c, "post", return_value=("sent", 0)).start()
+        self.gist = patch.object(c, "ensure_gist",
+                                 return_value="https://gist.github.com/test/abc123").start()
         self.addCleanup(patch.stopall)
         self.w.run(now=1000)
 

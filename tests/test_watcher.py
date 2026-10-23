@@ -36,6 +36,8 @@ class Fixture(unittest.TestCase):
                             "log_wait_seconds": 10, "retry_base_seconds": 1})
         self.query = patch.object(c, "query", return_value=[]).start()
         self.post = patch.object(c, "post", return_value=("sent", 0)).start()
+        self.gist = patch.object(c, "ensure_gist",
+                                 return_value="https://gist.github.com/test/abc123").start()
         patch.object(c.chains, "snapshot", return_value={}).start()
         self.addCleanup(patch.stopall)
         self.w.run(now=1000)
@@ -70,6 +72,7 @@ class Fixture(unittest.TestCase):
         directory = self.w.root / "reports" / row["id"]
         manifest = json.loads((directory / "report.json").read_text())
         self.assertEqual(len(manifest["logs"]), 1)
+        self.assertEqual(Path(manifest["logs"][0]["copy"]).suffix, ".txt")
         self.assertEqual((directory / manifest["logs"][0]["copy"]).read_bytes(), content)
         self.assertLessEqual(len(self.post.call_args.args[1]), 2900)
 
@@ -242,14 +245,21 @@ class Fixture(unittest.TestCase):
         self.assertFalse(manifest["logs"][0]["current"])
         self.assertEqual((directory / manifest["logs"][0]["copy"]).read_bytes(), b"retained")
 
-    def test_excerpts_preserve_final_bytes_of_both_streams(self):
-        paths = [self.root / "stdout", self.root / "stderr"]
-        for i, path in enumerate(paths):
-            path.write_text("x" * 10000 + f"FINAL-{i}")
-        text = c.slack_text(job(), "test", self.w.root, paths, True, 500)
-        self.assertIn("FINAL-0", text)
-        self.assertIn("FINAL-1", text)
-        self.assertLessEqual(len(text), 2900)
+    def test_slack_text_is_concise_and_links_the_gist(self):
+        classification = {"category": "application_failure",
+                          "explanation": "Job failed without a specific signature."}
+        cancellation = {"targets": [], "error": None, "status": "watching"}
+        text = c.slack_text(job(), classification, cancellation,
+                            "https://gist.github.com/test/abc123")
+        self.assertIn("*Slurm FAILED: test job 42 (test job)*", text)
+        self.assertIn("*Partition:*", text)
+        self.assertIn(f"*Time:* {c.stamp(950)} → {c.stamp(1100)} UTC", text)
+        self.assertIn("*Exit:* 1:0", text)
+        self.assertIn("*Failure:* application_failure", text)
+        self.assertIn("*Report and logs:* https://gist.github.com/test/abc123", text)
+        self.assertNotIn("Afterok chain", text)
+        self.assertNotIn("Tail of", text)
+        self.assertNotIn(str(self.w.root), text)
 
     def test_future_schema_rejected(self):
         with self.w.database() as db:
@@ -272,7 +282,7 @@ class Fixture(unittest.TestCase):
         self.assertEqual(json.loads(self.row()["classification"])["ruleset"], "quokka-v1")
         with self.w.database() as db:
             self.assertEqual(dict(db.execute("SELECT * FROM meta"))["initialized"], 1000)
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 4)
 
 
 class Accounting(unittest.TestCase):
@@ -372,14 +382,56 @@ class Paths(unittest.TestCase):
 
 class HttpAndSecurity(unittest.TestCase):
     @patch.object(c.urllib.request, "build_opener")
-    def test_http_success_and_plain_text(self, opener):
+    def test_http_success_and_markdown(self, opener):
         response = opener.return_value.open.return_value.__enter__.return_value
         response.status, response.read.return_value = 200, b"ok"
-        self.assertEqual(c.post("https://example.test", "<@U123> ```", 1), ("sent", 0))
+        gist = "https://gist.github.com/test/abc123"
+        self.assertEqual(c.post("https://example.test", f"<@U123> ``` {gist}", 1), ("sent", 0))
         request = opener.return_value.open.call_args.args[0]
         payload = json.loads(request.data)
-        self.assertEqual(payload["blocks"][0]["text"]["type"], "plain_text")
+        self.assertEqual(payload["blocks"][0]["text"]["type"], "mrkdwn")
+        self.assertTrue(payload["blocks"][0]["text"]["verbatim"])
         self.assertIn("&lt;", payload["text"])
+        self.assertIn("&lt;", payload["blocks"][0]["text"]["text"])
+        self.assertIn(f"<{gist}|Open secret gist>", payload["blocks"][0]["text"]["text"])
+
+    @patch.object(c.subprocess, "run")
+    def test_secret_gist_creation_and_existing_gist_recovery(self, run):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            key = "a" * 64
+            directory = root / "reports" / key
+            directory.mkdir(parents=True)
+            (directory / "log.txt").write_text("failure\n")
+            (directory / "report.json").write_text(json.dumps({"logs": [{"copy": "log.txt"}]}))
+            url = "https://gist.github.com/test/abc123"
+            run.side_effect = [subprocess.CompletedProcess([], 0, "", ""),
+                               subprocess.CompletedProcess([], 0, url + "\n", "")]
+            self.assertEqual(c.ensure_gist(c.DEFAULTS, root, key), url)
+            create = run.call_args_list[1].args[0]
+            self.assertEqual(create[:3], ["gh", "gist", "create"])
+            self.assertNotIn("--public", create)
+            self.assertIn(str(directory / "report.json"), create)
+            self.assertIn(str(directory / "log.txt"), create)
+            run.reset_mock()
+            run.side_effect = None
+            run.return_value = subprocess.CompletedProcess([], 0, url + "\n", "")
+            self.assertEqual(c.ensure_gist(c.DEFAULTS, root, key), url)
+            self.assertEqual(run.call_count, 1)
+
+    @patch.object(c.subprocess, "run")
+    def test_gist_timeout_recovers_created_event(self, run):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            key = "b" * 64
+            directory = root / "reports" / key
+            directory.mkdir(parents=True)
+            (directory / "report.json").write_text('{"logs": []}')
+            url = "https://gist.github.com/test/def456"
+            run.side_effect = [subprocess.CompletedProcess([], 0, "", ""),
+                               subprocess.TimeoutExpired("gh", 120),
+                               subprocess.CompletedProcess([], 0, url + "\n", "")]
+            self.assertEqual(c.ensure_gist(c.DEFAULTS, root, key), url)
 
     @patch.object(c.urllib.request, "build_opener")
     def test_http_error_classification(self, opener):
@@ -412,7 +464,7 @@ class HttpAndSecurity(unittest.TestCase):
                 c.read_secret(path)
 
     def test_configuration_validation(self):
-        for config in ({"excerpt_chars": 3000}, {"sacct_timeout": 0}, {"typo": 1}, {"settle_seconds": True}):
+        for config in ({"sacct_timeout": 0}, {"typo": 1}, {"settle_seconds": True}):
             with self.assertRaises(ValueError):
                 c.Watcher(config)
 

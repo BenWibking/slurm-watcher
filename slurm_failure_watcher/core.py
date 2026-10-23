@@ -33,6 +33,7 @@ FIELDS = ("Cluster", "DBIndex", "JobID", "JobIDRaw", "JobName", "User", "State",
           "Partition", "Account", "NodeList", "NNodes", "NTasks", "ReqMem",
           "Restarts", "WorkDir", "StdOut", "StdErr")
 SEP = "\x1f"
+GIST_URL = re.compile(r"https://gist\.github\.com/[A-Za-z0-9-]+/[0-9a-f]+")
 
 
 def open_log(path: Path):
@@ -248,7 +249,7 @@ def copy_log(directory: Path, path: Path, number: int) -> dict:
             raise OSError("log changed during snapshot")
         dest.flush()
         os.fsync(dest.fileno())
-    target = directory / f"{digest.hexdigest()}.bin"
+    target = directory / f"{digest.hexdigest()}.txt"
     os.replace(temporary, target)
     return {"source": str(path), "copy": target.name, "bytes": before.st_size,
             "sha256": digest.hexdigest()}
@@ -282,44 +283,25 @@ def report(root: Path, key: str, job: dict, paths: list[Path], details: list[dic
     return complete, bool(errors)
 
 
-def slack_text(job: dict, key: str, root: Path, paths: list[Path], complete: bool,
-               limit: int, classification: dict | None = None,
-               cancellation: dict | None = None) -> str:
-    # Escape Slack control syntax; plain_text blocks disable mentions and log markup.
-    summary = (f"Slurm {job['State']}: {job['Cluster']} job {job['JobID']} ({job['JobName'][:200]})\n"
-               f"Exit {job['ExitCode']}; end {job['End']} UTC; partition {job['Partition'][:100]}\n"
-               f"Report: {root / 'reports' / key}\n"
-               f"Logs: {'available and settled' if complete else 'partial/unavailable; report retries continue'}\n"
-               f"Event: {key[:16]}\n")
+def slack_text(job: dict, classification: dict | None = None,
+               cancellation: dict | None = None, gist_url: str | None = None) -> str:
+    summary = (f"*Slurm {job['State']}: {job['Cluster']} job {job['JobID']} ({job['JobName'][:200]})*\n"
+               f"*Partition:* {job['Partition'][:100]}\n"
+               f"*Time:* {job['Start']} → {job['End']} UTC ({job['Elapsed']})\n"
+               f"*Exit:* {job['ExitCode']}\n")
     if classification:
-        diagnosis = (f"Classification: {classification['category']} ({classification['confidence']}; "
-                     f"{classification['rule']})\n")
-        items = classification["evidence"]
-        if items:
-            item = items[0]
-            diagnosis += f"Evidence: {str(item['source'])[-100:]}:{item['line']}: {item['text'][:200]}\n"
-        summary = diagnosis + summary
+        summary += (f"*Failure:* {classification['category']} — "
+                    f"{classification['explanation']}\n")
     if cancellation:
         counts = {}
         for target in cancellation["targets"]:
             counts[target["status"]] = counts.get(target["status"], 0) + 1
-        state = "discovery/cancellation retry pending" if cancellation["error"] else cancellation["status"]
-        summary = f"Afterok chain: {counts or ('unknown' if cancellation['error'] else 'no downstream jobs found')}; {state}\n" + summary
-    excerpts = []
-    selected = paths[:8]
-    budget = limit // max(1, len(selected))
-    for path in selected:
-        try:
-            header = f"\nTail of {path}:\n"[:budget // 3]
-            tail_budget = budget - len(header)
-            with open_log(path) as stream:
-                stream.seek(0, os.SEEK_END)
-                stream.seek(max(0, stream.tell() - tail_budget))
-                tail = stream.read(tail_budget).decode("utf-8", errors="replace")
-            excerpts.append(header + tail)
-        except OSError:
-            continue
-    return (summary + "".join(excerpts))[:2900]
+        if counts or cancellation["error"]:
+            state = "discovery/cancellation retry pending" if cancellation["error"] else cancellation["status"]
+            summary += f"*Afterok chain:* {counts or 'unknown'}; {state}\n"
+    if gist_url:
+        summary += f"*Report and logs:* {gist_url}\n"
+    return summary[:2900]
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -328,8 +310,10 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def post(url: str, text: str, timeout: float) -> tuple[str, float]:
-    payload = json.dumps({"text": html.escape(text), "blocks": [{"type": "section",
-        "text": {"type": "plain_text", "text": text, "emoji": False}}],
+    escaped = html.escape(text, quote=False)
+    formatted = GIST_URL.sub(lambda match: f"<{match[0]}|Open secret gist>", escaped)
+    payload = json.dumps({"text": escaped, "blocks": [{"type": "section",
+        "text": {"type": "mrkdwn", "text": formatted, "verbatim": True}}],
         "unfurl_links": False, "unfurl_media": False}).encode()
     request = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
     try:
@@ -350,13 +334,76 @@ def post(url: str, text: str, timeout: float) -> tuple[str, float]:
         return "uncertain", 0
 
 
+def gist_description(key: str) -> str:
+    return f"slurm-watcher event {key}"
+
+
+def run_gh(config: dict, arguments: list[str]) -> str:
+    env = os.environ.copy()
+    env.update(GH_PROMPT_DISABLED="1", NO_COLOR="1")
+    try:
+        result = subprocess.run([config["gh"], *arguments], env=env, text=True,
+                                encoding="utf-8", errors="strict", capture_output=True,
+                                timeout=config["gist_timeout"], check=True)
+    except (subprocess.SubprocessError, UnicodeError, OSError) as error:
+        raise RuntimeError("GitHub CLI request failed") from error
+    return result.stdout
+
+
+def find_gist(config: dict, key: str) -> str | None:
+    description = gist_description(key)
+    expression = f'.[] | select(.description == "{description}") | .html_url'
+    output = run_gh(config, ["api", "--paginate", "gists?per_page=100",
+                             "--jq", expression])
+    urls = [line.strip() for line in output.splitlines() if line.strip()]
+    if any(GIST_URL.fullmatch(url) is None for url in urls):
+        raise RuntimeError("GitHub CLI returned an invalid gist URL")
+    if len(set(urls)) > 1:
+        raise RuntimeError("multiple gists exist for one watcher event")
+    return urls[0] if urls else None
+
+
+def ensure_gist(config: dict, root: Path, key: str) -> str:
+    existing = find_gist(config, key)
+    if existing:
+        return existing
+    directory = root / "reports" / key
+    manifest_path = directory / "report.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        names = list(dict.fromkeys(item["copy"] for item in manifest["logs"]))
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise RuntimeError("report manifest is unavailable or invalid") from error
+    files = [manifest_path]
+    for name in names:
+        path = directory / name
+        if (not isinstance(name, str) or Path(name).name != name or
+                path.parent != directory or not path.is_file()):
+            raise RuntimeError("report manifest references an invalid log copy")
+        files.append(path)
+    arguments = ["gist", "create", "--desc", gist_description(key),
+                 *(str(path) for path in files)]
+    try:
+        output = run_gh(config, arguments)
+    except RuntimeError:
+        recovered = find_gist(config, key)
+        if recovered:
+            return recovered
+        raise
+    urls = [line.strip() for line in output.splitlines() if GIST_URL.fullmatch(line.strip())]
+    if len(urls) != 1:
+        raise RuntimeError("GitHub CLI did not return one gist URL")
+    return urls[0]
+
+
 DEFAULTS = {"state_dir": "~/.slurm-failures", "webhook_file": "~/.config/slurm-failure-watcher/webhook",
             "sacct": "sacct", "sacct_timeout": 120, "slack_timeout": 20,
+            "gh": "gh", "gist_timeout": 120,
             "squeue": "squeue", "scancel": "scancel", "slurm_command_timeout": 120,
             "chain_scan_seconds": 60, "chain_watch_seconds": 86400,
             "overlap_seconds": 86400, "deep_scan_seconds": 86400, "settle_seconds": 60,
             "log_wait_seconds": 900, "retry_base_seconds": 60, "retry_max_seconds": 3600,
-            "excerpt_chars": 1800, "max_deliveries": 100}
+            "max_deliveries": 100}
 
 
 class Watcher:
@@ -371,8 +418,6 @@ class Watcher:
                 raise ValueError(f"{key} must be a positive integer")
             if isinstance(default, str) and (not isinstance(value, str) or not value):
                 raise ValueError(f"{key} must be a nonempty string")
-        if self.config["excerpt_chars"] > 1800:
-            raise ValueError("excerpt_chars must be at most 1800")
         self.root = Path(self.config["state_dir"]).expanduser().absolute()
 
     @contextlib.contextmanager
@@ -387,7 +432,7 @@ class Watcher:
                 return
             db = sqlite3.connect(self.root / "state.sqlite3", timeout=30)
             db.row_factory = sqlite3.Row
-            if db.execute("PRAGMA user_version").fetchone()[0] not in (0, 1, 2, 3):
+            if db.execute("PRAGMA user_version").fetchone()[0] not in (0, 1, 2, 3, 4):
                 db.close()
                 raise ValueError("unsupported state schema version")
             db.execute("PRAGMA synchronous=FULL")
@@ -407,7 +452,12 @@ class Watcher:
                 if "classification" not in {row[1] for row in db.execute("PRAGMA table_info(jobs)")}:
                     db.execute("ALTER TABLE jobs ADD COLUMN classification TEXT NOT NULL DEFAULT '{}'")
                     db.execute("UPDATE jobs SET report_done=0,report_next=0")
-                db.execute("PRAGMA user_version=3")
+                columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
+                if "gist_url" not in columns:
+                    db.execute("ALTER TABLE jobs ADD COLUMN gist_url TEXT")
+                    db.execute("ALTER TABLE jobs ADD COLUMN gist_attempts INTEGER NOT NULL DEFAULT 0")
+                    db.execute("ALTER TABLE jobs ADD COLUMN gist_error TEXT")
+                db.execute("PRAGMA user_version=4")
             chains.install_schema(db)
             try:
                 yield db
@@ -520,8 +570,23 @@ class Watcher:
                             db.execute("UPDATE jobs SET slack_next=? WHERE id=?", (now + config["retry_max_seconds"], key))
                         healthy = False
                         continue
-                    text = slack_text(job, key, self.root, paths, complete, config["excerpt_chars"],
-                                      classification, cancellation)
+                    gist_url = row["gist_url"]
+                    if not gist_url:
+                        try:
+                            gist_url = ensure_gist(config, self.root, key)
+                        except RuntimeError as error:
+                            attempts = row["gist_attempts"] + 1
+                            with db:
+                                db.execute("""UPDATE jobs SET gist_attempts=?,gist_error=?,slack_next=?
+                                    WHERE id=?""", (attempts, type(error).__name__,
+                                    now + self.backoff(attempts - 1), key))
+                            LOG.error("secret gist creation failed; Slack delivery remains pending")
+                            healthy = False
+                            continue
+                        with db:
+                            db.execute("""UPDATE jobs SET gist_url=?,gist_attempts=gist_attempts+1,
+                                gist_error=NULL WHERE id=?""", (gist_url, key))
+                    text = slack_text(job, classification, cancellation, gist_url)
                     with db:
                         db.execute("UPDATE jobs SET slack_status='sending',slack_attempts=slack_attempts+1 WHERE id=?", (key,))
                     status, delay = post(url, text, config["slack_timeout"])

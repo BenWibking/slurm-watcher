@@ -24,12 +24,20 @@ install -m 600 examples/config.json ~/.config/slurm-failure-watcher/config.json
 command -v sacct
 command -v squeue
 command -v scancel
+command -v gh
 ```
 
 Edit the installed configuration's `sacct`, `squeue`, and `scancel` values to the
 absolute executable paths on your site. If Slurm requires modules or special environment variables, arrange
 those in a private wrapper script and point the scheduler at that wrapper. Use an
 explicit Python path; cron and systemd do not load your interactive shell setup.
+
+Authenticate GitHub CLI as the watcher user and grant its token the `gist` scope.
+Set `gh` in the configuration to the absolute executable path. Before each Slack
+delivery, the watcher creates one secret gist containing `report.json` and its
+referenced log snapshots, then includes the gist URL in Slack. GitHub secret gists
+are unlisted, not access-controlled: anyone with the URL can read them. Use this
+only when uploading the report and logs complies with site and data policy.
 
 Create a Slack app with an incoming webhook for the intended channel using
 [Slack's incoming webhook instructions](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/).
@@ -331,8 +339,8 @@ that cost for a hard bound on tolerated accounting delay.
 State defaults to `~/.slurm-failures/` (0700). Each event has
 `reports/<event SHA256>/report.json`: full accounting metadata, original filename
 patterns, resolved source paths, discovery notes, copy errors, UTC snapshot time,
-completeness, and SHA256/byte counts of raw `.bin` log copies. Bytes are preserved,
-including non-UTF-8 data; full reports have no log-size cap. Identical stdout and
+completeness, and SHA256/byte counts of `.txt` log copies. Source bytes are
+preserved without transcoding; full reports have no log-size cap. Identical stdout and
 stderr paths are copied once. Files are copied in chunks; large logs require
 enough disk space and can lengthen a run. Copies are content-addressed and
 fsynced before the manifest is atomically replaced, so an interrupted refresh
@@ -368,13 +376,16 @@ state changes can trigger a refresh. Preserve source logs until reports complete
 Missing or unsettled logs produce partial reports and retry indefinitely with
 capped exponential backoff. Slack waits up to `log_wait_seconds` after discovery
 (default 15 minutes), then sends available excerpts with an explicit partial
-warning. Report attempts continue independently. Slack text is bounded to 2900
-characters, with at most `excerpt_chars` (default/max 1800) characters of tail
-excerpts across files. Excerpts share the budget across up to the first eight
-sorted source paths. Plain-text blocks prevent mentions and log markup;
-invalid UTF-8 is replaced only for Slack. Reports retain original bytes.
-Report paths in Slack are login-node paths, not uploaded attachments. Log tails
-may contain sensitive data: use a channel approved for your workload's contents.
+warning. Report attempts continue independently. Slack messages contain the job
+identity, partition, Slurm start/end/elapsed timestamps, failure category and
+explanation, exit code, and secret gist link. They omit local report paths and
+inline log excerpts; the gist contains the full report and copied logs. Slack
+mention/link control syntax is escaped before delivery.
+Reports retain original bytes.
+The full report and copied logs are also uploaded to an unlisted GitHub secret
+gist. A deterministic event description is checked before creation, allowing a
+retry to recover a gist created just before a timeout or process interruption.
+The persisted gist URL prevents later Slack retries from creating duplicates.
 
 ## Delivery durability and operational checks
 

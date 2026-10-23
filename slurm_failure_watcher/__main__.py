@@ -35,7 +35,8 @@ def main():
                     "chain_targets": [dict(row) for row in db.execute("""SELECT status,count(*) AS count
                         FROM chain_members GROUP BY status""")],
                     "deliveries": [dict(row) for row in db.execute("""SELECT slack_status,
-                        report_done, count(*) AS count FROM jobs GROUP BY slack_status, report_done""")]}, indent=2))
+                        report_done, gist_url IS NOT NULL AS gist_created, count(*) AS count
+                        FROM jobs GROUP BY slack_status, report_done, gist_created""")]}, indent=2))
             return 0
         retry = "uncertain" if args.retry_uncertain else "blocked" if args.retry_blocked else None
         return 0 if watcher.run(retry=retry) else 1

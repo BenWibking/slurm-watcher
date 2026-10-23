@@ -138,7 +138,9 @@ class Integration(unittest.TestCase):
             log.write_text("Writing checkpoint chk42\nWATCHDOG: No log writes for 900s. Collecting backtraces.\n")
             w = c.Watcher({"state_dir": str(root / "state"), "webhook_file": str(secret),
                            "settle_seconds": 1, "retry_base_seconds": 1, "log_wait_seconds": 5})
-            with patch.object(c, "query", return_value=[]) as query, patch.object(c, "post", return_value=("sent", 0)) as post:
+            with patch.object(c, "query", return_value=[]) as query, \
+                    patch.object(c, "ensure_gist", return_value="https://gist.github.com/test/abc123"), \
+                    patch.object(c, "post", return_value=("sent", 0)) as post:
                 w.run(now=1000)
                 query.return_value = [job(State="CANCELLED", StdOut=str(log), StdErr=str(log))]
                 w.run(now=1101)
@@ -174,7 +176,9 @@ class Integration(unittest.TestCase):
             log = root / "late"
             w = c.Watcher({"state_dir": str(root / "state"), "webhook_file": str(secret),
                            "settle_seconds": 1, "retry_base_seconds": 1, "log_wait_seconds": 5})
-            with patch.object(c, "query", return_value=[]) as query, patch.object(c, "post", return_value=("sent", 0)) as post:
+            with patch.object(c, "query", return_value=[]) as query, \
+                    patch.object(c, "ensure_gist", return_value="https://gist.github.com/test/abc123"), \
+                    patch.object(c, "post", return_value=("sent", 0)) as post:
                 w.run(now=1000)
                 query.return_value = [job(State="CANCELLED", StdOut=str(log), StdErr=str(log))]
                 w.run(now=1101)
@@ -184,7 +188,7 @@ class Integration(unittest.TestCase):
                 w.run(now=1125)
                 w.run(now=1130)
                 post.assert_called_once()
-                self.assertIn("watchdog-terminal-write", post.call_args.args[1])
+                self.assertIn("suspected_output_write_stall", post.call_args.args[1])
 
 
 if __name__ == "__main__":
