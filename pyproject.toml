@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slurm-failure-watcher"
+version = "1.0.0"
+description = "Per-user Slurm failure reports and Slack notifications"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+slurm-failure-watcher = "slurm_failure_watcher.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["slurm_failure_watcher*"]

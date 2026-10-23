@@ -1,0 +1,12 @@
+[Unit]
+Description=Poll per-user Slurm failures each minute
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=1min
+AccuracySec=5s
+RandomizedDelaySec=10s
+Unit=slurm-failure-watcher.service
+
+[Install]
+WantedBy=timers.target

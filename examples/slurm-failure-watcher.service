@@ -1,0 +1,10 @@
+[Unit]
+Description=Per-user Slurm failure watcher
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/venvs/slurm-failure-watcher/bin/slurm-failure-watcher
+UMask=0077
+# A large full-log copy may need longer; interruption is recoverable.
+TimeoutStartSec=15min
+NoNewPrivileges=yes
